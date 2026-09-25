@@ -1,0 +1,15 @@
+services:
+  raytracer:
+    build: .
+    image: raytrace2d:latest
+    container_name: raytrace2d
+    ports:
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/traces.db
+    volumes:
+      - raytrace-data:/data
+    restart: unless-stopped
+
+volumes:
+  raytrace-data:
