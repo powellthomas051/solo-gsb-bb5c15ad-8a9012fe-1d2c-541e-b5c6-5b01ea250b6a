@@ -151,8 +151,19 @@ def fresnel_transmittance(
         Tp = 4·ap·bp/(ap+bp)²，ap = n2·cos_i，bp = n1·cos_t
     计算，实现时取 4·[a/(a+b)]·[b/(a+b)]：只含正项之和与不超过 1 的比值，
     不发生 1 - R 的浮点抵消，折射率悬殊（如 1e-20 对 1）时仍能保留可表示
-    的微小正透过率。发生全反射（sin²t > 1）时返回 None。
-    返回 (cos_i, cos_t, Ts, Tp)。
+    的微小正透过率。
+
+    Ts/Tp 对 (n1, n2) 同乘任意正因子不变（零次齐次），故计算前先将折射率
+    按共同尺度归一：r1 = n1/scale、r2 = n2/scale，scale = max(n1, n2)，
+    再以 r1、r2 代替 n1、n2 求各乘积项。归一后 r1、r2 均在 (0, 1]，各
+    乘积项不超过 1、分母求和不超过 2：
+    - 两侧折射率同为 1e308 量级时，求和不再溢出为无穷（否则等折射率界面
+      会被错误算出零透过）；
+    - 两侧折射率同为 5e-324（最小正非规格化数）量级且斜入射时，r·cos 不再
+      下溢为零（否则分母为 0 触发除零）；
+    - 折射率悬殊时较小者按原量级参与比值，可表示的微小正透过率保持为正值，
+      全反射判定与极端折射率比行为不受影响。
+    发生全反射（sin²t > 1）时返回 None。返回 (cos_i, cos_t, Ts, Tp)。
     """
     nrm = normalize(normal)
     cos_i = _dot(direction, nrm)
@@ -165,8 +176,11 @@ def fresnel_transmittance(
     if sin2_t > 1.0:
         return None  # 全反射
     cos_t = math.sqrt(max(0.0, 1.0 - sin2_t))
-    a_s, b_s = n1 * cos_i, n2 * cos_t
-    a_p, b_p = n2 * cos_i, n1 * cos_t
+    # 共同尺度归一：较大者恒为 1，两者均在 (0, 1]，乘积与求和均不溢出/下溢
+    scale = max(n1, n2)
+    r1, r2 = n1 / scale, n2 / scale
+    a_s, b_s = r1 * cos_i, r2 * cos_t
+    a_p, b_p = r2 * cos_i, r1 * cos_t
     sum_s = a_s + b_s
     sum_p = a_p + b_p
     t_s = 4.0 * (a_s / sum_s) * (b_s / sum_s)
@@ -179,12 +193,13 @@ def ray_transmittance(
     status: str,
     interfaces: list[tuple[tuple[float, float], tuple[float, float], float]],
 ) -> tuple[float, float]:
-    """对一条已追迹光线逐界面累乘 s/p 功率透过率（数值稳定形式，见 fresnel_transmittance）。
+    """对一条已追迹光线逐界面累乘 s/p 功率透过率（对折射率共同尺度稳定，见 fresnel_transmittance）。
 
     复用 trace_ray 的结果：仅对 status=completed 的光线，按界面对应顺序取
     各折射段的入射方向与界面法线计算菲涅耳功率透过率并逐界面累乘，可表示的
-    微小正透过率保留为正值；全反射或中途漏过界面（status 非 completed）时
-    整条光线透过率记 0。无界面时透过率为 (1, 1)。
+    微小正透过率保留为正值；等折射率界面（含两侧同为 1e308 或 5e-324 量级）
+    透过率为 1；全反射或中途漏过界面（status 非 completed）时整条光线透过率
+    记 0。无界面时透过率为 (1, 1)。
     """
     if status != "completed":
         return 0.0, 0.0

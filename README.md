@@ -333,6 +333,7 @@ curl -X POST http://localhost:8000/api/aperture-beam-evaluations \
 - 以光线方向与界面法线求入射角余弦 `cos_i`（光线从法线背面入射时翻转法线），由斯涅尔定律 `sin_t = (n1/n2) sin_i` 求折射角余弦 `cos_t`；单界面 s/p **功率透过率**按数值稳定形式计算（与 `1 - R` 精确等价，但只含正项之和与不超过 1 的比值，折射率悬殊时不发生 `1 - R` 的浮点抵消）：
   - `Ts = 4·as·bs/(as+bs)²`，其中 `as = n1 cos_i`、`bs = n2 cos_t`
   - `Tp = 4·ap·bp/(ap+bp)²`，其中 `ap = n2 cos_i`、`bp = n1 cos_t`
+  - **折射率共同尺度归一**：`Ts`/`Tp` 对 `(n1, n2)` 同乘任意正因子不变（零次齐次），计算前先将折射率同除以 `max(n1, n2)`（归一后两者均在 `(0, 1]`，各乘积项不超过 1、分母求和不超过 2）。两侧折射率同为 `1e308` 时求和不再溢出为无穷、同为 `5e-324`（最小正非规格化数）且斜入射时乘余弦不再下溢为零触发除零；等折射率界面 `Ts = Tp = 1`（含上述极端量级）。
   - 逐界面累乘：`Ts = ∏Ts_i`、`Tp = ∏Tp_i`；可表示的微小正透过率（如介质折射率相差 1e20 倍时的 1e-20 量级）保留为正值，不误判为零。
 - 每条光线入射功率为 **1**，按占比混合：`power = s_fraction · Ts + (1 - s_fraction) · Tp`。
 - **全反射**（任一束光线追迹状态为 `total_internal_reflection`）或**漏过界面**（`no_intersection`，与界面平行或交点在反方向）时该光线记**零功率**（`Ts = Tp = power = 0`）。
@@ -413,7 +414,7 @@ curl -X POST http://localhost:8000/api/power-evaluations \
 - **有符号坐标**：观察线法线归一化后**逆时针旋转 90°** 得单位切向量 `t`（响应中回显为 `tangent`），命中坐标 `coordinate = (观察线交点 − 观察线给定点) · t`。
 - **探测区间与分箱**：探测区间为**闭区间** `[-detector_half_width, +detector_half_width]`（边界计入）；`bin_count` 个等宽分箱，`bin_width = detector_half_width·(2/bin_count)`，分箱中心 `c_i = detector_half_width·((i + 0.5)·2/bin_count − 1)`（首末中心各内缩半个箱宽）。箱宽、中心与相邻箱权重均按**归一化坐标** `u = s/detector_half_width`（探测区间恒为 `[-1, 1]`）计算，不经 `2·detector_half_width` 中间量：探测半宽很大（如 `1e308`）而数学箱宽仍可表示时，`bin_width`、分箱中心与各箱功率均为有限值；数学箱宽 `2·detector_half_width/bin_count` 本身不可表示（溢出为无穷，如 `detector_half_width=1e308、bin_count=1`）时返回 `422` 说明该参数组合。
 - **沉积规则**：仅**追迹完成（completed）、出射段前向命中观察线且坐标位于闭区间内**的光线参与沉积（`deposited = true`）。命中坐标在相邻分箱中心 `c_i`、`c_{i+1}` 之间时按**线性权重**分给两箱（`bin[i] += power·(c_{i+1} − s)/bin_width`，`bin[i+1] += power·(s − c_i)/bin_width`）；落在**首末中心之外但仍在探测范围内**时**全量计入边缘箱**，分配守恒、不丢边缘功率。
-- **功率口径**：每条光线入射功率为 1，`power = s_fraction·Ts + (1 − s_fraction)·Tp`（同功率评估，全反射或漏过界面记零功率）。`received_power` 为各箱功率之和（等于全部沉积光线的 `power` 之和）；`unreceived_power = total_input_power − received_power`，其中 `total_input_power` 恒等于采样光线数，未接收部分包含追迹失败、未命中观察线及落在探测区间之外的功率。
+- **功率口径**：每条光线入射功率为 1，`power = s_fraction·Ts + (1 − s_fraction)·Tp`（同功率评估：菲涅耳 s/p 透过率按折射率共同尺度归一计算，等折射率界面 `Ts = Tp = 1`——含两侧同为 `1e308` 或 `5e-324` 量级；全反射或漏过界面记零功率）。`received_power` 为各箱功率之和（等于全部沉积光线的 `power` 之和）；`unreceived_power = total_input_power − received_power`，其中 `total_input_power` 恒等于采样光线数，未接收部分包含追迹失败、未命中观察线及落在探测区间之外的功率。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -486,6 +487,60 @@ curl -X POST http://localhost:8000/api/detector-power-evaluations \
 - `received_power` / `unreceived_power`：接收总功率与未接收功率，二者之和恒等于 `total_input_power`（即 `ray_count`）。
 - `rays[]` 字段同功率评估，另含 `coordinate`（有符号命中坐标，无前向交点时为 `null`）与 `deposited`（是否参与沉积）。
 - 参数校验：`detector_half_width` 必须为正的有限值，`bin_count` 取值 1～1001，否则返回 `422`；探测半宽与分箱数使数学箱宽 `2·detector_half_width/bin_count` 超出浮点有限范围（溢出为无穷）时同样返回 `422`，响应给出该参数组合的具体数值说明。
+
+### 菲涅耳透过率数值边界示例
+
+功率评估与探测线功率分箱共用的菲涅耳 s/p 功率透过率对**折射率共同尺度**稳定：`Ts`/`Tp` 对 `(n1, n2)` 同乘任意正因子不变，计算前先将折射率同除以 `max(n1, n2)`，各乘积项不超过 1、分母求和不超过 2，因此：
+
+- **两侧折射率同为 `1e308`**：分母求和（如正入射时 `as+bs = 2e308`）不再溢出为无穷——否则 `a/(a+b)` 变成 `1e308/∞ = 0`，等折射率界面会被错误算出零透过；修复后等折射率界面 `Ts = Tp = 1`，每条光线功率为 1，有效功率等于命中光线数。
+- **两侧折射率同为 `5e-324`**（最小正非规格化数）**且斜入射**（`cos_i < 0.5`）：`n·cos` 不再下溢为零——否则分母 `as+bs` 为 0 触发除零（`ZeroDivisionError`，接口返回 500）；修复后等折射率界面 `Ts = Tp = 1`，探测分箱得到非零接收功率且汇总守恒。
+- **全反射与极端折射率比的既有行为不变**：全反射仍记零功率；折射率悬殊（如 `1e-20` 对 `1`、`1` 对 `1e308`）时可表示的微小正透过率仍保留为正值。
+
+```bash
+# 两侧折射率均 1e308 的等折射率界面：每条光线 Ts=Tp=power=1，有效功率 = 命中光线数
+curl -X POST http://localhost:8000/api/power-evaluations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start": {"x": 0, "y": 0},
+    "center_direction": {"x": 1, "y": 0},
+    "half_angle_deg": 10,
+    "sample_count": 5,
+    "n_start": 1e308,
+    "interfaces": [
+      {"point": {"x": 2, "y": 0}, "normal": {"x": 1, "y": 0}, "n_next": 1e308}
+    ],
+    "observation_line": {"point": {"x": 10, "y": 0}, "normal": {"x": 1, "y": 0}},
+    "s_fraction": 0.5
+  }'
+# hit_count = 5，effective_power = 5.0，各光线 transmittance_s = transmittance_p = 1.0
+
+# 两侧折射率均 5e-324 且斜入射（半角 70°，边缘光线 cos_i ≈ 0.342 < 0.5）：
+# 不再返回 500；各箱功率非零，received_power = 5.0，received + unreceived = total_input
+curl -X POST http://localhost:8000/api/detector-power-evaluations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start": {"x": 0, "y": 0},
+    "center_direction": {"x": 1, "y": 0},
+    "half_angle_deg": 70,
+    "sample_count": 5,
+    "n_start": 5e-324,
+    "interfaces": [
+      {"point": {"x": 2, "y": 0}, "normal": {"x": 1, "y": 0}, "n_next": 5e-324}
+    ],
+    "observation_line": {"point": {"x": 10, "y": 0}, "normal": {"x": 1, "y": 0}},
+    "s_fraction": 0.5,
+    "detector_half_width": 30.0,
+    "bin_count": 4
+  }'
+# bin_width = 15.0，bins 功率 = [1.0, 1.5, 1.5, 1.0]（中心 ±22.5 / ±7.5），
+# received_power = 5.0，unreceived_power = 0.0，deposited_count = 5
+```
+
+上述边界的自动化复现验证见 `tests/test_fresnel_boundaries.py`（几何层用例只依赖标准库，API 级用例需安装 fastapi）：
+
+```bash
+pytest tests/test_fresnel_boundaries.py      # 或：python3 tests/test_fresnel_boundaries.py
+```
 
 ## 波前光程差评估
 
@@ -938,10 +993,12 @@ curl -X POST http://localhost:8000/api/chromatic-beam-evaluations \
 ```
 app/
   main.py       FastAPI 路由与生命周期（启动时建库）
-  geometry.py   二维求交、数值稳定的斯涅尔折射（极大折射率比下不溢出、正入射保持方向）、方向采样、光斑质心/RMS、菲涅耳 s/p 透过率与功率加权质心、探测线功率分箱（相邻分箱中心线性分配、边缘截断）、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）、折射率标定（固定其余界面替换目标 n_next，均方残差扫描 + 低谷黄金分割细化）、有限口径追迹（逐界面口径半宽检查，首个失败界面终止）、柯西色散折射率（n=A+B/λ²）
+  geometry.py   二维求交、数值稳定的斯涅尔折射（极大折射率比下不溢出、正入射保持方向）、方向采样、光斑质心/RMS、菲涅耳 s/p 透过率（对折射率共同尺度稳定，等折射率界面 Ts=Tp=1）与功率加权质心、探测线功率分箱（相邻分箱中心线性分配、边缘截断）、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）、折射率标定（固定其余界面替换目标 n_next，均方残差扫描 + 低谷黄金分割细化）、有限口径追迹（逐界面口径半宽检查，首个失败界面终止）、柯西色散折射率（n=A+B/λ²）
   comparison.py 两条已保存追迹的状态与分段对齐比较（统一浮点容差、缺段报告）
   db.py         SQLite 持久化（traces / segments 两表）
   schemas.py    Pydantic 请求 / 响应模型
+tests/
+  test_fresnel_boundaries.py  菲涅耳透过率折射率共同尺度边界的复现验证（等折射率 1e308 求和溢出、5e-324 斜入射下溢除零、极端折射率比与全反射行为保持、功率评估与探测分箱非零功率与守恒汇总）
 Dockerfile
 docker-compose.yml
 requirements.txt
