@@ -1,0 +1,6 @@
+# 本地运行回归测试的开发依赖（Docker 镜像与一键启动不需要）：
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests/
+-r requirements.txt
+pytest>=8.0
+httpx>=0.27

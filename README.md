@@ -22,6 +22,15 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+### 运行测试（本地开发，可选）
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+`tests/` 为菲涅耳透过率尺度边界与两个功率接口的 pytest 回归测试（含两侧同为 `1e308`、同为次正规数 `5e-324` 斜入射等边界复现），测试库使用临时 SQLite 文件，不影响卷内数据；Docker 镜像不包含测试目录，`docker compose up --build` 无需开发依赖。
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -117,6 +126,15 @@ curl -X POST http://localhost:8000/api/traces \
 ```
 
 多界面追迹继续使用修正后的有限方向做前向求交；提交（`POST /api/traces`）与查询（`GET /api/traces/{id}`、`GET /api/traces/{id}/segments/{seg_index}`）接口对同一追迹给出一致的有限分段结果。
+
+### 菲涅耳透过率的共同尺度边界（功率评估 / 探测分箱共用）
+
+`/api/power-evaluations` 与 `/api/detector-power-evaluations` 共用同一套菲涅耳 s/p 功率透过率计算。透过率本为 `Ts = 4·n1·cos_i·n2·cos_t/(n1·cos_i + n2·cos_t)²`（p 分量交换两个折射率的位置），**先将两折射率除以共同尺度** `m = max(n1, n2)` 再代入：`r1 = n1/m`、`r2 = n2/m` 只含折射率比，与两侧折射率的绝对量级无关，因此两种边界情形均给出物理正确结果：
+
+- **两侧折射率同为最大量级**（`n_start = n_next = 1e308`，斜入射同理）：旧实现直接做 `n·cos` 与正项求和，`1e308 + 1e308` 溢出为无穷，`a/(a+b)` 变成 0，等折射率界面被误算为**零透过**（功率评估 `effective_power = 0`、质心为 `null`）；共同尺度归一化后 `r1 = r2 = 1`，严格 `Ts = Tp = 1`，每条光线功率为 1、有效功率等于光线数、质心与探测分箱汇总均非空。
+- **两侧折射率同处次正规数区间且斜入射**（`n_start = n_next = 5e-324`，约为最小正双精度浮点数，半角取至 70° 等大斜角）：旧实现 `n·cos`（`5e-324 × 0.34` 以下）下溢为 0，正项之和为 0 触发**除零**，接口返回 `500`；归一化后比值仍为 1，各正项为 `cos` 量级，透过率严格为 1，探测分箱返回 200、各箱得到非零功率且 `received_power + unreceived_power = total_input_power`。
+
+既有行为保持不变：折射率悬殊（如 `1` 对 `1e308`、`1e-20` 对 `1`）时保留可表示的微小正透过率（正入射约 `4·min(n1,n2)/max(n1,n2)`，如 `4e-308`、`4e-20`）；超过临界角仍判全反射并记零功率（含 `1e300 -> 1` 这类比值溢出的极端情形）；普通折射率下结果与教科书菲涅耳公式一致（绝对误差 1e-12 量级内），透过率恒在 `0～1`。
 
 ### 掠射（近平行）求交
 
@@ -330,10 +348,12 @@ curl -X POST http://localhost:8000/api/aperture-beam-evaluations \
 
 `POST /api/power-evaluations` 在光束请求（起点、中心方向、折射率、顺序界面、观察线、半角、采样数）基础上增加 `s_fraction`（s 偏振入射功率占比，取值 0～1，p 偏振占 `1 - s_fraction`），复用同一套扇形采样与光线追迹，逐界面按**菲涅耳公式**计算 s/p 偏振的功率反射率与透过率。该接口为即时计算，结果不写入数据库。
 
-- 以光线方向与界面法线求入射角余弦 `cos_i`（光线从法线背面入射时翻转法线），由斯涅尔定律 `sin_t = (n1/n2) sin_i` 求折射角余弦 `cos_t`；单界面 s/p **功率透过率**按数值稳定形式计算（与 `1 - R` 精确等价，但只含正项之和与不超过 1 的比值，折射率悬殊时不发生 `1 - R` 的浮点抵消）：
-  - `Ts = 4·as·bs/(as+bs)²`，其中 `as = n1 cos_i`、`bs = n2 cos_t`
-  - `Tp = 4·ap·bp/(ap+bp)²`，其中 `ap = n2 cos_i`、`bp = n1 cos_t`
-  - 逐界面累乘：`Ts = ∏Ts_i`、`Tp = ∏Tp_i`；可表示的微小正透过率（如介质折射率相差 1e20 倍时的 1e-20 量级）保留为正值，不误判为零。
+- 以光线方向与界面法线求入射角余弦 `cos_i`（光线从法线背面入射时翻转法线），由斯涅尔定律 `sin_t = (n1/n2) sin_i` 求折射角余弦 `cos_t`；单界面 s/p **功率透过率**按数值稳定形式计算（与 `1 - R` 精确等价，但只含不超过 1 的比值，折射率悬殊时不发生 `1 - R` 的浮点抵消）。计算前先把两折射率除以**共同尺度** `m = max(n1, n2)`，令 `r1 = n1/m`、`r2 = n2/m`（二者只含折射率比、落在 `(0, 1]`，较大者恰为 1），再代入
+  - `Ts = 4·as·bs/(as+bs)²`，其中 `as = r1·cos_i`、`bs = r2·cos_t`
+  - `Tp = 4·ap·bp/(ap+bp)²`，其中 `ap = r2·cos_i`、`bp = r1·cos_t`
+  - 共同尺度把折射率的绝对量级约去，公式对两侧折射率**同时放大或缩小**不变：两侧同为 `1e308` 时正项之和不再溢出为无穷（等折射率界面严格 `Ts = Tp = 1`，旧实现误得零透过）；两侧同处最小次正规数区间（如 `5e-324`）且斜入射时，乘余弦的各项仍为 `1e-324` 量级正数、不下溢为零（不触发除零，旧实现该情形返回 `500`）。
+  - 逐界面累乘：`Ts = ∏Ts_i`、`Tp = ∏Tp_i`；可表示的微小正透过率（如介质折射率相差 1e20 倍时的 1e-20 量级）保留为正值，不误判为零；数学上小于最小可表示浮点数的透过率如实下溢为零。
+  - **等折射率界面**（`n1 = n2`，任意尺度、任意入射角）无反射，严格返回 `Ts = Tp = 1`。
 - 每条光线入射功率为 **1**，按占比混合：`power = s_fraction · Ts + (1 - s_fraction) · Tp`。
 - **全反射**（任一束光线追迹状态为 `total_internal_reflection`）或**漏过界面**（`no_intersection`，与界面平行或交点在反方向）时该光线记**零功率**（`Ts = Tp = power = 0`）。
 - 仅**追迹完成且与观察线有前向交点**的光线计入**有效功率**（其 `power` 之和）与**功率加权质心**（按相对功率加权，与 `Σ(power·point)/Σpower` 等价）；追迹完成但观察线无交点的光线有透过率但不计入。
@@ -413,7 +433,7 @@ curl -X POST http://localhost:8000/api/power-evaluations \
 - **有符号坐标**：观察线法线归一化后**逆时针旋转 90°** 得单位切向量 `t`（响应中回显为 `tangent`），命中坐标 `coordinate = (观察线交点 − 观察线给定点) · t`。
 - **探测区间与分箱**：探测区间为**闭区间** `[-detector_half_width, +detector_half_width]`（边界计入）；`bin_count` 个等宽分箱，`bin_width = detector_half_width·(2/bin_count)`，分箱中心 `c_i = detector_half_width·((i + 0.5)·2/bin_count − 1)`（首末中心各内缩半个箱宽）。箱宽、中心与相邻箱权重均按**归一化坐标** `u = s/detector_half_width`（探测区间恒为 `[-1, 1]`）计算，不经 `2·detector_half_width` 中间量：探测半宽很大（如 `1e308`）而数学箱宽仍可表示时，`bin_width`、分箱中心与各箱功率均为有限值；数学箱宽 `2·detector_half_width/bin_count` 本身不可表示（溢出为无穷，如 `detector_half_width=1e308、bin_count=1`）时返回 `422` 说明该参数组合。
 - **沉积规则**：仅**追迹完成（completed）、出射段前向命中观察线且坐标位于闭区间内**的光线参与沉积（`deposited = true`）。命中坐标在相邻分箱中心 `c_i`、`c_{i+1}` 之间时按**线性权重**分给两箱（`bin[i] += power·(c_{i+1} − s)/bin_width`，`bin[i+1] += power·(s − c_i)/bin_width`）；落在**首末中心之外但仍在探测范围内**时**全量计入边缘箱**，分配守恒、不丢边缘功率。
-- **功率口径**：每条光线入射功率为 1，`power = s_fraction·Ts + (1 − s_fraction)·Tp`（同功率评估，全反射或漏过界面记零功率）。`received_power` 为各箱功率之和（等于全部沉积光线的 `power` 之和）；`unreceived_power = total_input_power − received_power`，其中 `total_input_power` 恒等于采样光线数，未接收部分包含追迹失败、未命中观察线及落在探测区间之外的功率。
+- **功率口径**：每条光线入射功率为 1，`power = s_fraction·Ts + (1 − s_fraction)·Tp`（同功率评估，菲涅耳透过率先按共同尺度 `m = max(n1,n2)` 归一化折射率再计算，两侧同为 `1e308` 或同为次正规数 `5e-324` 的等折射率界面均严格透过 1，不溢出、不除零；全反射或漏过界面记零功率）。`received_power` 为各箱功率之和（等于全部沉积光线的 `power` 之和）；`unreceived_power = total_input_power − received_power`，其中 `total_input_power` 恒等于采样光线数，未接收部分包含追迹失败、未命中观察线及落在探测区间之外的功率。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -938,11 +958,13 @@ curl -X POST http://localhost:8000/api/chromatic-beam-evaluations \
 ```
 app/
   main.py       FastAPI 路由与生命周期（启动时建库）
-  geometry.py   二维求交、数值稳定的斯涅尔折射（极大折射率比下不溢出、正入射保持方向）、方向采样、光斑质心/RMS、菲涅耳 s/p 透过率与功率加权质心、探测线功率分箱（相邻分箱中心线性分配、边缘截断）、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）、折射率标定（固定其余界面替换目标 n_next，均方残差扫描 + 低谷黄金分割细化）、有限口径追迹（逐界面口径半宽检查，首个失败界面终止）、柯西色散折射率（n=A+B/λ²）
+  geometry.py   二维求交、数值稳定的斯涅尔折射（极大折射率比下不溢出、正入射保持方向）、方向采样、光斑质心/RMS、菲涅耳 s/p 透过率（折射率先按共同尺度 max(n1,n2) 归一化，两侧同为 1e308 不溢出、同为次正规数 5e-324 斜入射不下溢除零，等折射率界面严格 Ts=Tp=1）与功率加权质心、探测线功率分箱（相邻分箱中心线性分配、边缘截断）、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）、折射率标定（固定其余界面替换目标 n_next，均方残差扫描 + 低谷黄金分割细化）、有限口径追迹（逐界面口径半宽检查，首个失败界面终止）、柯西色散折射率（n=A+B/λ²）
   comparison.py 两条已保存追迹的状态与分段对齐比较（统一浮点容差、缺段报告）
   db.py         SQLite 持久化（traces / segments 两表）
   schemas.py    Pydantic 请求 / 响应模型
+tests/          菲涅耳透过率尺度边界与两个功率接口的 pytest 回归测试（开发依赖见 requirements-dev.txt）
 Dockerfile
 docker-compose.yml
 requirements.txt
+requirements-dev.txt
 ```
